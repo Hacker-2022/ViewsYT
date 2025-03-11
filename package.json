@@ -12,6 +12,7 @@
     "http-proxy-agent": "^5.0.0",
     "https-proxy-agent": "^5.0.0",
     "inquirer": "^8.2.6",
+    "socks-proxy-agent": "^7.0.0",
     "winston": "^3.11.0"
   }
 }
