@@ -1,7 +1,17 @@
 {
-  "name": "video-watcher",
+  "name": "views-yt",
   "version": "1.0.0",
+  "description": "YouTube video viewer with proxy rotation",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.2",
+    "chalk": "^4.1.2",
+    "http-proxy-agent": "^5.0.0",
+    "https-proxy-agent": "^5.0.0",
+    "inquirer": "^8.2.6",
+    "winston": "^3.11.0"
   }
 }
