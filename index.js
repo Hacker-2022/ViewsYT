@@ -9,13 +9,14 @@ const { sleep } = require('./utils');
 
 // Configuration
 const CONFIG = {
-    MIN_WATCH_DURATION: 1140, // 19 minutes
-    MAX_WATCH_DURATION: 1260, // 21 minutes
-    DELAY_BETWEEN_VIEWS: 10,  // 10 seconds
+    MIN_WATCH_DURATION: 30, // 30 seconds
+    MAX_WATCH_DURATION: 60, // 60 seconds
+    DELAY_BETWEEN_VIEWS: 5,  // 5 seconds
     MAX_RETRIES: 3,
     SUPPORTED_PROTOCOLS: ['http', 'https', 'socks4', 'socks5'],
-    CONNECTION_TIMEOUT: 5000,  // 5 seconds timeout for connections
-    MAX_PROXIES_TO_TRY: 100    // Maximum number of proxies to try before refreshing the list
+    CONNECTION_TIMEOUT: 3000,  // 3 seconds timeout for connections
+    MAX_PROXIES_TO_TRY: 100,   // Maximum number of proxies to try before refreshing the list
+    QUICK_CHECK_TIMEOUT: 1000  // 1 second for quick check
 };
 
 // Progress bars
@@ -64,7 +65,9 @@ async function fetchProxies() {
     // GeoNode API
     try {
         console.log(chalk.blue('Fetching proxies from GeoNode API...'));
-        const response = await axios.get('https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&filterUpTime=90&protocols=http%2Chttps%2Csocks4%2Csocks5&anonymityLevel=elite&anonymityLevel=anonymous');
+        const response = await axios.get('https://proxylist.geonode.com/api/proxy-list?limit=100&page=1&sort_by=lastChecked&sort_type=desc&filterUpTime=90&protocols=http%2Chttps%2Csocks4%2Csocks5&anonymityLevel=elite&anonymityLevel=anonymous', {
+            timeout: 10000
+        });
         
         if (response.data && response.data.data) {
             const proxies = response.data.data.map(p => {
@@ -89,7 +92,9 @@ async function fetchProxies() {
     try {
         for (const protocol of CONFIG.SUPPORTED_PROTOCOLS) {
             console.log(chalk.blue(`Fetching ${protocol} proxies from ProxyScrape...`));
-            const response = await axios.get(`https://api.proxyscrape.com/v2/?request=displayproxies&protocol=${protocol}&timeout=10000&country=all&ssl=all&anonymity=all`);
+            const response = await axios.get(`https://api.proxyscrape.com/v2/?request=displayproxies&protocol=${protocol}&timeout=10000&country=all&ssl=all&anonymity=all`, {
+                timeout: 10000
+            });
             
             const proxies = response.data
                 .split('\n')
@@ -119,24 +124,80 @@ function getProxyAgent(proxy) {
     const { protocol, host, port } = proxy;
     const proxyUrl = `${protocol}://${host}:${port}`;
     
-    switch (protocol) {
-        case 'http':
-            return new HttpProxyAgent(proxyUrl);
-        case 'https':
-            return new HttpsProxyAgent(proxyUrl);
-        case 'socks4':
-        case 'socks5':
-            return new SocksProxyAgent(proxyUrl);
-        default:
-            throw new Error(`Unsupported protocol: ${protocol}`);
+    try {
+        switch (protocol) {
+            case 'http':
+                return new HttpProxyAgent(proxyUrl);
+            case 'https':
+                return new HttpsProxyAgent(proxyUrl);
+            case 'socks4':
+            case 'socks5':
+                return new SocksProxyAgent(proxyUrl);
+            default:
+                throw new Error(`Unsupported protocol: ${protocol}`);
+        }
+    } catch (error) {
+        console.error(chalk.red(`Error creating agent for ${proxyUrl}: ${error.message}`));
+        return null;
     }
+}
+
+// Quick check if a proxy is responsive
+async function quickCheckProxy(proxy) {
+    return new Promise(resolve => {
+        const timeoutId = setTimeout(() => {
+            resolve(false);
+        }, CONFIG.QUICK_CHECK_TIMEOUT);
+
+        try {
+            const agent = getProxyAgent(proxy);
+            if (!agent) {
+                clearTimeout(timeoutId);
+                resolve(false);
+                return;
+            }
+
+            const axiosConfig = {
+                httpsAgent: agent,
+                httpAgent: agent,
+                timeout: CONFIG.QUICK_CHECK_TIMEOUT - 200,
+                validateStatus: () => true // Accept any status code
+            };
+
+            axios.head('https://www.google.com', axiosConfig)
+                .then(() => {
+                    clearTimeout(timeoutId);
+                    resolve(true);
+                })
+                .catch(() => {
+                    clearTimeout(timeoutId);
+                    resolve(false);
+                });
+        } catch (error) {
+            clearTimeout(timeoutId);
+            resolve(false);
+        }
+    });
 }
 
 async function watchVideo(url, proxy) {
     const progressBar = multibar.create(100, 0, { status: 'Starting view...' });
     
     try {
+        // Quick check first
+        progressBar.update(10, { status: 'Quick checking proxy...' });
+        const isResponsive = await quickCheckProxy(proxy);
+        if (!isResponsive) {
+            progressBar.stop();
+            return false;
+        }
+
         const agent = getProxyAgent(proxy);
+        if (!agent) {
+            progressBar.stop();
+            return false;
+        }
+
         const axiosConfig = {
             httpsAgent: agent,
             httpAgent: agent,
@@ -151,12 +212,27 @@ async function watchVideo(url, proxy) {
         };
 
         progressBar.update(20, { status: 'Accessing video...' });
-        await axios.get(url, axiosConfig);
+        
+        // Try to access the video with retries
+        let success = false;
+        for (let attempt = 0; attempt < CONFIG.MAX_RETRIES && !success; attempt++) {
+            try {
+                await axios.get(url, axiosConfig);
+                success = true;
+            } catch (error) {
+                if (attempt === CONFIG.MAX_RETRIES - 1) throw error;
+                await sleep(1000); // Wait a bit before retrying
+            }
+        }
+        
+        if (!success) {
+            throw new Error('Failed to access video after retries');
+        }
         
         const watchDuration = Math.floor(Math.random() * (CONFIG.MAX_WATCH_DURATION - CONFIG.MIN_WATCH_DURATION + 1)) + CONFIG.MIN_WATCH_DURATION;
-        const updateInterval = Math.floor(watchDuration / 80);
+        const updateInterval = Math.max(1, Math.floor(watchDuration / 10));
         
-        progressBar.update(20, { status: `Watching video for ${Math.floor(watchDuration/60)} minutes...` });
+        progressBar.update(20, { status: `Watching video for ${watchDuration} seconds...` });
         
         for (let i = 0; i < watchDuration; i += updateInterval) {
             await sleep(updateInterval * 1000);
@@ -173,8 +249,12 @@ async function watchVideo(url, proxy) {
         progressBar.stop();
         if (error.code === 'ECONNREFUSED') {
             console.error(chalk.red(`Connection refused by proxy ${proxy.protocol}://${proxy.host}:${proxy.port}`));
-        } else if (error.code === 'ETIMEDOUT') {
+        } else if (error.code === 'ETIMEDOUT' || error.code === 'ESOCKETTIMEDOUT') {
             console.error(chalk.red(`Connection timed out for proxy ${proxy.protocol}://${proxy.host}:${proxy.port}`));
+        } else if (error.code === 'ECONNRESET') {
+            console.error(chalk.red(`Connection reset by proxy ${proxy.protocol}://${proxy.host}:${proxy.port}`));
+        } else if (error.code === 'EHOSTUNREACH') {
+            console.error(chalk.red(`Host unreachable for proxy ${proxy.protocol}://${proxy.host}:${proxy.port}`));
         } else {
             console.error(chalk.red(`Error with proxy ${proxy.protocol}://${proxy.host}:${proxy.port}:`, error.message));
         }
@@ -205,8 +285,19 @@ async function main() {
     let successfulViews = 0;
     let currentProxyIndex = 0;
     let triedProxies = 0;
+    let consecutiveFailures = 0;
 
     while (successfulViews < viewCount) {
+        // If too many consecutive failures, refresh proxy list
+        if (consecutiveFailures >= 20) {
+            console.log(chalk.yellow('\nToo many consecutive failures. Refreshing proxy list...'));
+            proxies = await fetchProxies();
+            currentProxyIndex = 0;
+            triedProxies = 0;
+            consecutiveFailures = 0;
+            continue;
+        }
+
         const proxy = proxies[currentProxyIndex];
         console.log(chalk.blue(`\nAttempt ${successfulViews + 1}/${viewCount} using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`));
         
@@ -215,8 +306,10 @@ async function main() {
         if (success) {
             successfulViews++;
             viewProgressBar.increment(1, { status: `${successfulViews}/${viewCount} views complete` });
+            consecutiveFailures = 0; // Reset consecutive failures counter
         } else {
             console.log(chalk.red('✗ View failed, trying next proxy...'));
+            consecutiveFailures++;
         }
 
         // Move to next proxy
@@ -229,6 +322,7 @@ async function main() {
             proxies = await fetchProxies();
             currentProxyIndex = 0;
             triedProxies = 0;
+            consecutiveFailures = 0;
         }
 
         // Wait between views
