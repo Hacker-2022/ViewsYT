@@ -12,7 +12,10 @@ const CONFIG = {
     MAX_WATCH_DURATION: 1260, // 21 minutes
     DELAY_BETWEEN_VIEWS: 10,  // 10 seconds
     MAX_RETRIES: 3,
-    SUPPORTED_PROTOCOLS: ['http', 'https', 'socks4', 'socks5']
+    SUPPORTED_PROTOCOLS: ['http', 'https', 'socks4', 'socks5'],
+    PROXY_TEST_TIMEOUT: 5000,  // 5 seconds timeout for testing each proxy
+    PROXY_TEST_BATCH_SIZE: 50, // Test 50 proxies at a time
+    PROXY_TEST_TOTAL_TIMEOUT: 30000 // 30 seconds total timeout for each batch
 };
 
 async function getVideoUrl() {
@@ -126,7 +129,7 @@ async function testProxy(proxy) {
         const axiosConfig = {
             httpsAgent: agent,
             httpAgent: agent,
-            timeout: 30000,
+            timeout: CONFIG.PROXY_TEST_TIMEOUT,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -144,6 +147,68 @@ async function testProxy(proxy) {
     } catch (error) {
         return false;
     }
+}
+
+async function testProxyBatch(proxies, startIndex) {
+    const batchSize = CONFIG.PROXY_TEST_BATCH_SIZE;
+    const endIndex = Math.min(startIndex + batchSize, proxies.length);
+    const batch = proxies.slice(startIndex, endIndex);
+    
+    console.log(chalk.blue(`Testing proxies ${startIndex + 1}-${endIndex} of ${proxies.length}...`));
+    
+    const results = await Promise.all(
+        batch.map(async proxy => {
+            try {
+                const working = await testProxy(proxy);
+                if (working) {
+                    console.log(chalk.green(`✓ Working proxy found: ${proxy.protocol}://${proxy.host}:${proxy.port}`));
+                }
+                return { proxy, working };
+            } catch (error) {
+                return { proxy, working: false };
+            }
+        })
+    );
+
+    return results.filter(r => r.working).map(r => r.proxy);
+}
+
+async function testProxiesWithTimeout(proxies) {
+    const workingProxies = [];
+    const totalBatches = Math.ceil(proxies.length / CONFIG.PROXY_TEST_BATCH_SIZE);
+    
+    for (let i = 0; i < proxies.length; i += CONFIG.PROXY_TEST_BATCH_SIZE) {
+        const batchNumber = Math.floor(i / CONFIG.PROXY_TEST_BATCH_SIZE) + 1;
+        console.log(chalk.yellow(`\nTesting batch ${batchNumber}/${totalBatches}`));
+        
+        try {
+            const timeoutPromise = new Promise((_, reject) => 
+                setTimeout(() => reject(new Error('Batch timeout')), CONFIG.PROXY_TEST_TOTAL_TIMEOUT)
+            );
+            
+            const batchResultPromise = testProxyBatch(proxies, i);
+            const batchResults = await Promise.race([batchResultPromise, timeoutPromise])
+                .catch(error => {
+                    if (error.message === 'Batch timeout') {
+                        console.log(chalk.yellow('Batch timeout reached, moving to next batch...'));
+                        return [];
+                    }
+                    return [];
+                });
+            
+            workingProxies.push(...batchResults);
+            
+            // If we have at least 10 working proxies, we can start
+            if (workingProxies.length >= 10) {
+                console.log(chalk.green(`Found ${workingProxies.length} working proxies, starting video views...`));
+                break;
+            }
+        } catch (error) {
+            console.error(chalk.red(`Error testing batch: ${error.message}`));
+        }
+    }
+    
+    return workingProxies;
 }
 
 async function watchVideo(url, proxy) {
@@ -201,21 +266,8 @@ async function main() {
         return;
     }
 
-    console.log(chalk.green(`Starting to generate ${viewCount} views with ${proxies.length} proxies...`));
-    console.log(chalk.blue('Testing proxies...'));
-    
-    // Test proxies in parallel
-    const proxyTests = await Promise.all(
-        proxies.map(async proxy => ({
-            proxy,
-            working: await testProxy(proxy)
-        }))
-    );
-    
-    // Filter working proxies
-    proxies = proxyTests
-        .filter(test => test.working)
-        .map(test => test.proxy);
+    console.log(chalk.green(`Starting to test ${proxies.length} proxies...`));
+    proxies = await testProxiesWithTimeout(proxies);
     
     console.log(chalk.green(`Found ${proxies.length} working proxies`));
     
@@ -248,15 +300,10 @@ async function main() {
             console.log(chalk.yellow('Refreshing proxy list...'));
             const newProxies = await fetchProxies();
             if (newProxies.length > 0) {
-                const proxyTests = await Promise.all(
-                    newProxies.map(async proxy => ({
-                        proxy,
-                        working: await testProxy(proxy)
-                    }))
-                );
-                proxies = proxyTests
-                    .filter(test => test.working)
-                    .map(test => test.proxy);
+                const workingProxies = await testProxiesWithTimeout(newProxies);
+                if (workingProxies.length > 0) {
+                    proxies = workingProxies;
+                }
             }
         }
 
