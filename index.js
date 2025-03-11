@@ -5,10 +5,17 @@ const cliProgress = require('cli-progress');
 const { HttpsProxyAgent } = require('https-proxy-agent');
 const { HttpProxyAgent } = require('http-proxy-agent');
 const { SocksProxyAgent } = require('socks-proxy-agent');
-const { sleep } = require('./utils');
+const fs = require('fs');
+const path = require('path');
+
+// Sleep function
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Configuration
 const CONFIG = {
+    // Reduced watch duration for faster testing
     MIN_WATCH_DURATION: 30, // 30 seconds
     MAX_WATCH_DURATION: 60, // 60 seconds
     DELAY_BETWEEN_VIEWS: 5,  // 5 seconds
@@ -16,7 +23,15 @@ const CONFIG = {
     SUPPORTED_PROTOCOLS: ['http', 'https', 'socks4', 'socks5'],
     CONNECTION_TIMEOUT: 3000,  // 3 seconds timeout for connections
     MAX_PROXIES_TO_TRY: 100,   // Maximum number of proxies to try before refreshing the list
-    QUICK_CHECK_TIMEOUT: 1000  // 1 second for quick check
+    QUICK_CHECK_TIMEOUT: 1000,  // 1 second for quick check
+    SAVE_WORKING_PROXIES: true, // Save working proxies to file
+    WORKING_PROXIES_FILE: 'working_proxies.json',
+    USER_AGENTS: [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:90.0) Gecko/20100101 Firefox/90.0'
+    ]
 };
 
 // Progress bars
@@ -25,6 +40,36 @@ const multibar = new cliProgress.MultiBar({
     hideCursor: true,
     format: '{bar} {percentage}% | {value}/{total} | {status}'
 }, cliProgress.Presets.shades_grey);
+
+// Load working proxies from file if exists
+function loadWorkingProxies() {
+    try {
+        if (fs.existsSync(CONFIG.WORKING_PROXIES_FILE)) {
+            const data = fs.readFileSync(CONFIG.WORKING_PROXIES_FILE, 'utf8');
+            const proxies = JSON.parse(data);
+            console.log(chalk.green(`Loaded ${proxies.length} working proxies from file`));
+            return proxies;
+        }
+    } catch (error) {
+        console.error(chalk.yellow(`Error loading working proxies: ${error.message}`));
+    }
+    return [];
+}
+
+// Save working proxies to file
+function saveWorkingProxies(proxies) {
+    try {
+        fs.writeFileSync(CONFIG.WORKING_PROXIES_FILE, JSON.stringify(proxies, null, 2));
+        console.log(chalk.green(`Saved ${proxies.length} working proxies to file`));
+    } catch (error) {
+        console.error(chalk.yellow(`Error saving working proxies: ${error.message}`));
+    }
+}
+
+// Get random user agent
+function getRandomUserAgent() {
+    return CONFIG.USER_AGENTS[Math.floor(Math.random() * CONFIG.USER_AGENTS.length)];
+}
 
 async function getVideoUrl() {
     const { videoUrl } = await inquirer.prompt([
@@ -61,6 +106,11 @@ async function getViewCount() {
 
 async function fetchProxies() {
     const allProxies = [];
+    const workingProxies = loadWorkingProxies();
+    
+    if (workingProxies.length > 0) {
+        allProxies.push(...workingProxies);
+    }
 
     // GeoNode API
     try {
@@ -77,7 +127,9 @@ async function fetchProxies() {
                     host: p.ip,
                     port: p.port,
                     country: p.country,
-                    anonymity: p.anonymityLevel
+                    anonymity: p.anonymityLevel,
+                    working: false,
+                    lastChecked: Date.now()
                 }));
             }).flat();
             
@@ -106,7 +158,9 @@ async function fetchProxies() {
                     host: proxy.split(':')[0],
                     port: parseInt(proxy.split(':')[1]),
                     country: 'Unknown',
-                    anonymity: 'Unknown'
+                    anonymity: 'Unknown',
+                    working: false,
+                    lastChecked: Date.now()
                 }));
 
             allProxies.push(...proxies);
@@ -116,8 +170,51 @@ async function fetchProxies() {
         console.error(chalk.red('Error fetching from ProxyScrape:', error.message));
     }
 
+    // Free-proxy-list.net (additional source from Python code)
+    try {
+        console.log(chalk.blue('Fetching proxies from free-proxy-list.net...'));
+        const response = await axios.get('https://free-proxy-list.net/', {
+            timeout: 10000
+        });
+        
+        // Extract proxies from HTML table
+        const html = response.data;
+        const regex = /(\d+\.\d+\.\d+\.\d+):(\d+)/g;
+        let match;
+        const proxies = [];
+        
+        while ((match = regex.exec(html)) !== null) {
+            proxies.push({
+                protocol: 'http',
+                host: match[1],
+                port: parseInt(match[2]),
+                country: 'Unknown',
+                anonymity: 'Unknown',
+                working: false,
+                lastChecked: Date.now()
+            });
+        }
+        
+        allProxies.push(...proxies);
+        console.log(chalk.green(`Successfully fetched ${proxies.length} proxies from free-proxy-list.net`));
+    } catch (error) {
+        console.error(chalk.red('Error fetching from free-proxy-list.net:', error.message));
+    }
+
+    // Remove duplicates
+    const uniqueProxies = [];
+    const seen = new Set();
+    
+    for (const proxy of allProxies) {
+        const key = `${proxy.protocol}://${proxy.host}:${proxy.port}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniqueProxies.push(proxy);
+        }
+    }
+
     // Shuffle the proxies for better distribution
-    return allProxies.sort(() => Math.random() - 0.5);
+    return uniqueProxies.sort(() => Math.random() - 0.5);
 }
 
 function getProxyAgent(proxy) {
@@ -161,12 +258,17 @@ async function quickCheckProxy(proxy) {
                 httpsAgent: agent,
                 httpAgent: agent,
                 timeout: CONFIG.QUICK_CHECK_TIMEOUT - 200,
-                validateStatus: () => true // Accept any status code
+                validateStatus: () => true, // Accept any status code
+                headers: {
+                    'User-Agent': getRandomUserAgent()
+                }
             };
 
             axios.head('https://www.google.com', axiosConfig)
                 .then(() => {
                     clearTimeout(timeoutId);
+                    proxy.working = true;
+                    proxy.lastChecked = Date.now();
                     resolve(true);
                 })
                 .catch(() => {
@@ -180,7 +282,7 @@ async function quickCheckProxy(proxy) {
     });
 }
 
-async function watchVideo(url, proxy) {
+async function watchVideo(url, proxy, workingProxies) {
     const progressBar = multibar.create(100, 0, { status: 'Starting view...' });
     
     try {
@@ -198,16 +300,34 @@ async function watchVideo(url, proxy) {
             return false;
         }
 
+        // Extract video ID for referrer
+        const videoId = url.includes('watch?v=') 
+            ? url.split('watch?v=')[1].split('&')[0]
+            : url.split('youtu.be/')[1].split('?')[0];
+            
+        const referrers = [
+            'https://www.google.com/search?q=' + encodeURIComponent(`${videoId} youtube`),
+            'https://www.facebook.com/',
+            'https://www.reddit.com/',
+            'https://www.bing.com/search?q=' + encodeURIComponent(`youtube ${videoId}`),
+            'https://t.co/',
+            'https://www.youtube.com/results?search_query=' + encodeURIComponent(videoId)
+        ];
+        
+        const randomReferrer = referrers[Math.floor(Math.random() * referrers.length)];
+
         const axiosConfig = {
             httpsAgent: agent,
             httpAgent: agent,
             timeout: CONFIG.CONNECTION_TIMEOUT,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'User-Agent': getRandomUserAgent(),
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
+                'Upgrade-Insecure-Requests': '1',
+                'Referer': randomReferrer,
+                'Cache-Control': 'max-age=0'
             }
         };
 
@@ -244,6 +364,19 @@ async function watchVideo(url, proxy) {
         
         progressBar.update(100, { status: 'Complete!' });
         progressBar.stop();
+        
+        // Add to working proxies list
+        if (!workingProxies.some(p => p.host === proxy.host && p.port === proxy.port && p.protocol === proxy.protocol)) {
+            proxy.working = true;
+            proxy.lastChecked = Date.now();
+            workingProxies.push(proxy);
+            
+            // Save working proxies periodically
+            if (CONFIG.SAVE_WORKING_PROXIES) {
+                saveWorkingProxies(workingProxies);
+            }
+        }
+        
         return true;
     } catch (error) {
         progressBar.stop();
@@ -286,6 +419,7 @@ async function main() {
     let currentProxyIndex = 0;
     let triedProxies = 0;
     let consecutiveFailures = 0;
+    let workingProxies = [];
 
     while (successfulViews < viewCount) {
         // If too many consecutive failures, refresh proxy list
@@ -301,7 +435,7 @@ async function main() {
         const proxy = proxies[currentProxyIndex];
         console.log(chalk.blue(`\nAttempt ${successfulViews + 1}/${viewCount} using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`));
         
-        const success = await watchVideo(videoUrl, proxy);
+        const success = await watchVideo(videoUrl, proxy, workingProxies);
         
         if (success) {
             successfulViews++;
@@ -340,6 +474,11 @@ async function main() {
     multibar.stop();
     console.log(chalk.green('\n=== Summary ==='));
     console.log(chalk.green(`Successfully generated ${successfulViews} views`));
+    
+    // Save final list of working proxies
+    if (CONFIG.SAVE_WORKING_PROXIES && workingProxies.length > 0) {
+        saveWorkingProxies(workingProxies);
+    }
 }
 
 // Run the main function
