@@ -1,0 +1,9 @@
+# This file is used as a fallback if the proxy APIs fail
+# Add your own working proxies below, one per line
+# Format: http://ip:port or http://username:password@ip:port
+# Lines starting with # are ignored 
+
+# Example proxies (replace with real ones):
+http://proxy1.example.com:8080
+http://proxy2.example.com:3128
+http://user:pass@proxy3.example.com:8080 

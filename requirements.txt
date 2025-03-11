@@ -1,0 +1,9 @@
+selenium==4.1.0
+requests==2.27.1
+colorama==0.4.4
+psutil==5.9.0
+schedule==1.1.0
+yaspin==2.1.0
+webdriver-manager==3.5.2
+beautifulsoup4==4.10.0
+lxml==4.8.0 
