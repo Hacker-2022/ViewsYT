@@ -14,8 +14,8 @@ const CONFIG = {
     DELAY_BETWEEN_VIEWS: 10,  // 10 seconds
     MAX_RETRIES: 3,
     SUPPORTED_PROTOCOLS: ['http', 'https', 'socks4', 'socks5'],
-    PROXY_TEST_TIMEOUT: 5000,  // 5 seconds timeout for testing each proxy
-    PROXY_VERIFICATION_BATCH_SIZE: 5 // Verify 5 proxies at a time when needed
+    CONNECTION_TIMEOUT: 5000,  // 5 seconds timeout for connections
+    MAX_PROXIES_TO_TRY: 100    // Maximum number of proxies to try before refreshing the list
 };
 
 // Progress bars
@@ -26,34 +26,36 @@ const multibar = new cliProgress.MultiBar({
 }, cliProgress.Presets.shades_grey);
 
 async function getVideoUrl() {
-    const { url } = await inquirer.prompt([{
-        type: 'input',
-        name: 'url',
-        message: 'Enter YouTube video URL:',
-        validate: (input) => {
-            if (!input) return 'Please enter a URL';
-            if (!input.includes('youtube.com/watch?v=') && !input.includes('youtu.be/')) {
-                return 'Please enter a valid YouTube URL';
+    const { videoUrl } = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'videoUrl',
+            message: 'Enter YouTube video URL:',
+            default: 'https://www.youtube.com/watch?v=NWRQe9tUbAY',
+            validate: function(value) {
+                const valid = value.includes('youtube.com/watch?v=') || value.includes('youtu.be/');
+                return valid || 'Please enter a valid YouTube video URL';
             }
-            return true;
         }
-    }]);
-    return url;
+    ]);
+    return videoUrl;
 }
 
 async function getViewCount() {
-    const { count } = await inquirer.prompt([{
-        type: 'number',
-        name: 'count',
-        message: 'How many views do you want to generate?',
-        default: 100,
-        validate: (input) => {
-            const num = parseInt(input);
-            if (isNaN(num) || num <= 0) return 'Please enter a positive number';
-            return true;
+    const { viewCount } = await inquirer.prompt([
+        {
+            type: 'input',
+            name: 'viewCount',
+            message: 'How many views do you want to generate?',
+            default: '2',
+            validate: function(value) {
+                const valid = !isNaN(parseInt(value)) && parseInt(value) > 0;
+                return valid || 'Please enter a valid number';
+            },
+            filter: Number
         }
-    }]);
-    return count;
+    ]);
+    return viewCount;
 }
 
 async function fetchProxies() {
@@ -72,8 +74,7 @@ async function fetchProxies() {
                     host: p.ip,
                     port: p.port,
                     country: p.country,
-                    anonymity: p.anonymityLevel,
-                    verified: false
+                    anonymity: p.anonymityLevel
                 }));
             }).flat();
             
@@ -100,8 +101,7 @@ async function fetchProxies() {
                     host: proxy.split(':')[0],
                     port: parseInt(proxy.split(':')[1]),
                     country: 'Unknown',
-                    anonymity: 'Unknown',
-                    verified: false
+                    anonymity: 'Unknown'
                 }));
 
             allProxies.push(...proxies);
@@ -116,10 +116,9 @@ async function fetchProxies() {
 }
 
 function getProxyAgent(proxy) {
-    const { protocol, host, port, username, password } = proxy;
-    const auth = username && password ? `${username}:${password}@` : '';
-    const proxyUrl = `${protocol}://${auth}${host}:${port}`;
-
+    const { protocol, host, port } = proxy;
+    const proxyUrl = `${protocol}://${host}:${port}`;
+    
     switch (protocol) {
         case 'http':
             return new HttpProxyAgent(proxyUrl);
@@ -133,57 +132,6 @@ function getProxyAgent(proxy) {
     }
 }
 
-async function testProxy(proxy) {
-    try {
-        const agent = getProxyAgent(proxy);
-        const axiosConfig = {
-            httpsAgent: agent,
-            httpAgent: agent,
-            timeout: CONFIG.PROXY_TEST_TIMEOUT,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            }
-        };
-
-        await axios.get('https://www.youtube.com', axiosConfig);
-        proxy.verified = true;
-        return true;
-    } catch (error) {
-        return false;
-    }
-}
-
-async function verifyNextProxies(proxies, startIndex, requiredCount) {
-    const endIndex = Math.min(startIndex + CONFIG.PROXY_VERIFICATION_BATCH_SIZE, proxies.length);
-    const batch = proxies.slice(startIndex, endIndex);
-    const progressBar = multibar.create(batch.length, 0, { status: 'Verifying proxies...' });
-    
-    const results = await Promise.all(
-        batch.map(async (proxy) => {
-            if (proxy.verified) return true;
-            
-            progressBar.increment(0, { 
-                status: `Testing ${proxy.protocol}://${proxy.host}:${proxy.port}`
-            });
-            
-            const working = await testProxy(proxy);
-            progressBar.increment(1);
-            
-            if (working) {
-                console.log(chalk.green(`\n✓ Working proxy found: ${proxy.protocol}://${proxy.host}:${proxy.port}`));
-            }
-            return working;
-        })
-    );
-
-    progressBar.stop();
-    return results.filter(r => r).length;
-}
-
 async function watchVideo(url, proxy) {
     const progressBar = multibar.create(100, 0, { status: 'Starting view...' });
     
@@ -192,7 +140,7 @@ async function watchVideo(url, proxy) {
         const axiosConfig = {
             httpsAgent: agent,
             httpAgent: agent,
-            timeout: 30000,
+            timeout: CONFIG.CONNECTION_TIMEOUT,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -201,15 +149,6 @@ async function watchVideo(url, proxy) {
                 'Upgrade-Insecure-Requests': '1'
             }
         };
-
-        // Only test if not verified
-        if (!proxy.verified) {
-            progressBar.update(10, { status: 'Testing proxy...' });
-            const isWorking = await testProxy(proxy);
-            if (!isWorking) {
-                throw new Error('Proxy test failed');
-            }
-        }
 
         progressBar.update(20, { status: 'Accessing video...' });
         await axios.get(url, axiosConfig);
@@ -260,21 +199,14 @@ async function main() {
         return;
     }
 
-    console.log(chalk.green(`\nFetched ${proxies.length} proxies. Will verify them as needed.`));
+    console.log(chalk.green(`\nFetched ${proxies.length} proxies. Using them directly without testing.`));
     
     const viewProgressBar = multibar.create(viewCount, 0, { status: 'Starting views...' });
     let successfulViews = 0;
     let currentProxyIndex = 0;
-    let verifiedCount = 0;
+    let triedProxies = 0;
 
     while (successfulViews < viewCount) {
-        // Verify more proxies if needed
-        if (verifiedCount < Math.min(viewCount * 2, proxies.length) && 
-            currentProxyIndex + CONFIG.PROXY_VERIFICATION_BATCH_SIZE <= proxies.length) {
-            const newVerified = await verifyNextProxies(proxies, currentProxyIndex, viewCount * 2);
-            verifiedCount += newVerified;
-        }
-
         const proxy = proxies[currentProxyIndex];
         console.log(chalk.blue(`\nAttempt ${successfulViews + 1}/${viewCount} using proxy: ${proxy.protocol}://${proxy.host}:${proxy.port}`));
         
@@ -289,12 +221,14 @@ async function main() {
 
         // Move to next proxy
         currentProxyIndex = (currentProxyIndex + 1) % proxies.length;
+        triedProxies++;
         
-        // If we've gone through all proxies, fetch new ones
-        if (currentProxyIndex === 0) {
-            console.log(chalk.yellow('\nRefreshing proxy list...'));
+        // If we've tried too many proxies, fetch new ones
+        if (triedProxies >= CONFIG.MAX_PROXIES_TO_TRY) {
+            console.log(chalk.yellow('\nTried too many proxies. Refreshing proxy list...'));
             proxies = await fetchProxies();
-            verifiedCount = 0;
+            currentProxyIndex = 0;
+            triedProxies = 0;
         }
 
         // Wait between views
@@ -314,19 +248,7 @@ async function main() {
     console.log(chalk.green(`Successfully generated ${successfulViews} views`));
 }
 
-// Create utils.js if it doesn't exist
-const fs = require('fs');
-if (!fs.existsSync('utils.js')) {
-    fs.writeFileSync('utils.js', `
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-module.exports = { sleep };
-    `.trim());
-}
-
+// Run the main function
 main().catch(error => {
-    console.error(chalk.red('Fatal error:', error.message));
-    process.exit(1);
+    console.error(chalk.red('An error occurred:', error));
 });
